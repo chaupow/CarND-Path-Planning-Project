@@ -53,9 +53,10 @@ int main() {
 
   int lane = 1;
   double ref_vel = 0;
+  int lane_change_in_progress = 0;
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel]
+               &map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel, &lane_change_in_progress]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -99,25 +100,63 @@ int main() {
           }
 
           bool too_close = false;
+          bool has_car_left = lane == 0;
+          bool has_car_right = lane == 2;
 
+          // check if a car in front is too close
           for (int i = 0; i < sensor_fusion.size(); i++) {
             float d = sensor_fusion[i][6];
-            if(d < (2+4*lane+2) && d > (2+4*lane-2)) {
-              double vx = sensor_fusion[i][3];
-              double vy = sensor_fusion[i][4];
-              double check_speed = sqrt(vx*vx+vy*vy);
-              double check_car_s = sensor_fusion[i][5];
+            double vx = sensor_fusion[i][3];
+            double vy = sensor_fusion[i][4];
+            double check_speed = sqrt(vx*vx+vy*vy);
+            double check_car_s = sensor_fusion[i][5];
+            check_car_s +=((double)prev_size*.02*check_speed);
 
-              check_car_s +=((double)prev_size*.02*check_speed);
+            if(d < (2+4*lane+2) && d > (2+4*lane-2)) {
               if((check_car_s > car_s) && ((check_car_s-car_s) < 30)){
-                // ref_vel = 29.5;
                 too_close = true;
               }
             }
+            else if(lane > 0 && d < (2+4*(lane-1)+2) && d > (2+4*(lane-1)-2)) {
+              if(check_car_s > (car_s - 3) && check_car_s < (30 + car_s)){
+                has_car_left = true;
+              }
+            }
+            else if(lane < 2 && d < (2+4*(lane+1)+2) && d > (2+4*(lane+1)-2)) {
+              if(check_car_s > (car_s - 3) && check_car_s < (30 + car_s)){
+                has_car_right = true;
+              }
+            }
+
+
+
           }
 
-          if (too_close) ref_vel -= .224;
-          else if (ref_vel < 49.5) ref_vel += .224;
+          if (too_close && lane_change_in_progress == 0) {
+            std::cout << "want to switch lanes " << lane << has_car_left << has_car_right << std::endl;
+            if (!has_car_left && lane > 0) {
+              std::cout << "current lane " << lane << std::endl;
+              lane = lane - 1;
+              std::cout << "new lane " << lane << std::endl;
+              too_close = false; 
+              lane_change_in_progress = 2;
+            }
+            else if (!has_car_right && lane < 2) {
+              std::cout << "current lane " << lane << std::endl;
+              lane = lane + 1;
+              std::cout << "new lane " << lane << std::endl;
+              too_close = false;
+              lane_change_in_progress = 2;
+            }
+          }
+
+          if (lane_change_in_progress > 0) lane_change_in_progress -= 1;
+
+
+
+
+          if (too_close || lane_change_in_progress) ref_vel -= .224;
+          // else if (ref_vel < 49.5) ref_vel += .224;
 
 
           json msgJson;
@@ -191,7 +230,7 @@ int main() {
           double x_add_on = 0;
 
           for (int i = 1; i <= 50 - previous_path_x.size(); i++) {
-            if (!too_close && ref_vel < 49.5) ref_vel += .224;
+            if (!too_close && ref_vel < 49.5 && lane_change_in_progress == 0) ref_vel += .224;
             double N = (target_dist/(.02*ref_vel/2.24));
             double x_point = x_add_on+(target_x)/N;
             double y_point = s(x_point);
