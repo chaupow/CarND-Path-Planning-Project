@@ -52,7 +52,7 @@ int main() {
   }
 
   int lane = 1;
-  double ref_vel = 49.5;
+  double ref_vel = 0;
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
                &map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel]
@@ -110,10 +110,14 @@ int main() {
 
               check_car_s +=((double)prev_size*.02*check_speed);
               if((check_car_s > car_s) && ((check_car_s-car_s) < 30)){
-                ref_vel = 29.5;
+                // ref_vel = 29.5;
+                too_close = true;
               }
             }
           }
+
+          if (too_close) ref_vel -= .224;
+          else if (ref_vel < 49.5) ref_vel += .224;
 
 
           json msgJson;
@@ -187,6 +191,7 @@ int main() {
           double x_add_on = 0;
 
           for (int i = 1; i <= 50 - previous_path_x.size(); i++) {
+            if (!too_close && ref_vel < 49.5) ref_vel += .224;
             double N = (target_dist/(.02*ref_vel/2.24));
             double x_point = x_add_on+(target_x)/N;
             double y_point = s(x_point);
