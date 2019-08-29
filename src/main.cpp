@@ -51,12 +51,18 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
+  double TARGET_VEL = 49.5;
+  double MAX_VEL_DIFF = .224;
+  int LOOKAHEAD_DIST = 30;
+  int LOOKBACK_DIST = 3;
+
+  // initialize start lane, start speed and whether there's a lane change in progress
   int lane = 1;
   double ref_vel = 0;
   int lane_change_in_progress = 0;
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel, &lane_change_in_progress]
+               &map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel, &lane_change_in_progress, &TARGET_VEL, &MAX_VEL_DIFF, &LOOKAHEAD_DIST, &LOOKBACK_DIST]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -103,7 +109,8 @@ int main() {
           bool has_car_left = lane == 0;
           bool has_car_right = lane == 2;
 
-          // check if a car in front is too close
+          // observe other cars and decide whether there 
+          // is a car too close in front or in neighbouring lanes
           for (int i = 0; i < sensor_fusion.size(); i++) {
             float d = sensor_fusion[i][6];
             double vx = sensor_fusion[i][3];
@@ -112,62 +119,45 @@ int main() {
             double check_car_s = sensor_fusion[i][5];
             check_car_s +=((double)prev_size*.02*check_speed);
 
+            // check if a car in front is too close
             if(d < (2+4*lane+2) && d > (2+4*lane-2)) {
-              if((check_car_s > car_s) && ((check_car_s-car_s) < 30)){
+              if((check_car_s > car_s) && ((check_car_s-car_s) < LOOKAHEAD_DIST)) {
                 too_close = true;
               }
             }
+            // check if there are cars left or right
             else if(lane > 0 && d < (2+4*(lane-1)+2) && d > (2+4*(lane-1)-2)) {
-              if(check_car_s > (car_s - 3) && check_car_s < (30 + car_s)){
+              if(check_car_s > (car_s - LOOKBACK_DIST) && check_car_s < (LOOKAHEAD_DIST + car_s)){
                 has_car_left = true;
               }
             }
             else if(lane < 2 && d < (2+4*(lane+1)+2) && d > (2+4*(lane+1)-2)) {
-              if(check_car_s > (car_s - 3) && check_car_s < (30 + car_s)){
+              if(check_car_s > (car_s - LOOKBACK_DIST) && check_car_s < (LOOKAHEAD_DIST + car_s)){
                 has_car_right = true;
               }
             }
-
-
-
           }
 
+          // attempt to change lanes if car is too close to the car in front
+          // and if there is no lane change in progress
           if (too_close && lane_change_in_progress == 0) {
-            std::cout << "want to switch lanes " << lane << has_car_left << has_car_right << std::endl;
+            // std::cout << "want to switch lanes " << lane << has_car_left << has_car_right << std::endl;
             if (!has_car_left && lane > 0) {
-              std::cout << "current lane " << lane << std::endl;
-              lane = lane - 1;
-              std::cout << "new lane " << lane << std::endl;
+              lane -= 1;
               too_close = false; 
               lane_change_in_progress = 2;
             }
             else if (!has_car_right && lane < 2) {
-              std::cout << "current lane " << lane << std::endl;
-              lane = lane + 1;
-              std::cout << "new lane " << lane << std::endl;
+              lane += 1;
               too_close = false;
               lane_change_in_progress = 2;
             }
           }
 
           if (lane_change_in_progress > 0) lane_change_in_progress -= 1;
+          // slow down a bit if about to collide with other car or when doing a lane change
+          if (too_close || lane_change_in_progress > 0) ref_vel -= MAX_VEL_DIFF;
 
-
-
-
-          if (too_close || lane_change_in_progress) ref_vel -= .224;
-          // else if (ref_vel < 49.5) ref_vel += .224;
-
-
-          json msgJson;
-
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
 
           vector<double> ptsx;
           vector<double> ptsy;
@@ -176,6 +166,7 @@ int main() {
           double ref_y = car_y;
           double ref_yaw = deg2rad(car_yaw);
 
+          // get coordinates of previous (or current) locations
           if (prev_size < 2) {
             double prev_car_x = car_x - cos(car_yaw);
             double prev_car_y = car_y - sin(car_yaw);
@@ -201,13 +192,14 @@ int main() {
             ptsy.push_back(ref_y);
           }
 
+          // get goal coordinates on the road in LOOKAHEAD_DIST, 60 and 90 s units along the road
           for (int i = 1; i <= 3; ++i) {
-            vector<double> next_wp = getXY(car_s+i*30, 2+4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> next_wp = getXY(car_s+i*LOOKAHEAD_DIST, 2+4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
             ptsx.push_back(next_wp[0]);
             ptsy.push_back(next_wp[1]);
           }
 
-          // car view
+          // convert these coordinates into car view
           for (int i = 0; i < ptsx.size(); i++) {
             double shift_x = ptsx[i] - ref_x;
             double shift_y = ptsy[i] - ref_y;
@@ -216,21 +208,36 @@ int main() {
             ptsy[i] = (shift_x*sin(0-ref_yaw)+shift_y*cos(0-ref_yaw));
           }
 
+          // get a spline that goes through current/previous car positions and to the goal/future coordinates
           tk::spline s;
           s.set_points(ptsx, ptsy);
 
+
+          // assemble final trajectory
+          json msgJson;
+
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+
+
+          // add previous points to the next points
           for (int i = 0; i < previous_path_x.size(); i++) {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           } 
 
-          double target_x = 30.0;
+          // use the splines to interpolate next coordinates that form a smooth trajectory
+          double target_x = LOOKAHEAD_DIST;
           double target_y = s(target_x);
           double target_dist = sqrt((target_x)*(target_x)+(target_y)*(target_y));
           double x_add_on = 0;
 
           for (int i = 1; i <= 50 - previous_path_x.size(); i++) {
-            if (!too_close && ref_vel < 49.5 && lane_change_in_progress == 0) ref_vel += .224;
+
+            // speed up if car is not driving target speed
+            if (!too_close && ref_vel < TARGET_VEL && lane_change_in_progress == 0) ref_vel += MAX_VEL_DIFF;
+            if (ref_vel > TARGET_VEL) ref_vel = TARGET_VEL;
+            
             double N = (target_dist/(.02*ref_vel/2.24));
             double x_point = x_add_on+(target_x)/N;
             double y_point = s(x_point);
